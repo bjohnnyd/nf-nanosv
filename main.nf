@@ -20,14 +20,22 @@ process alignReads {
         path reads
         path ref
     output:
-        path 'alignment.sort.bam', emit: alignment
+        path '*alignment.sort.bam', emit: alignment
+        path 'lowmq*'
+    script:
+    def bamName = params.name ? "${params.name}.alignment.sort.bam" :"alignment.sort.bam" 
 
-    "minimap2 --cs --MD -t ${task.cpus} -ax map-ont ${ref} ${reads} | samtools sort -o alignment.sort.bam - "
+    """
+    minimap2 --cs --MD -t ${task.cpus} -ax map-ont ${ref} ${reads} | samtools sort -o ${bamName} - 
+    samtools view -h ${bamName} | awk '\$1 ~ /^@/ || \$5<5 '  | samtools sort -o lowmq.sort.bam -
+    samtools depth lowmq.sort.bam > lowq.depth
+    SURVIVOR bincov ${params.windowSize} ${params.lowQualSupport} 2 > lowmq_regions.bed
+    """
 
 }
 
 process svimCall {
-    publishDir "${baseOutdir}/svim_calls", mode: 'copy'
+    publishDir "${baseOutdir}/sv/svim_calls", mode: 'copy'
     input:
         path bam
         path ref
@@ -52,7 +60,7 @@ process svimCall {
     bcftools index ${outRawVcf}
     bcftools filter -i 'FILTER=="PASS" && SVTYPE=="BND"' ${outRawVcf} | bcftools sort -Oz  -o ${outBndVcf} - 
     bcftools index ${outBndVcf}
-    bcftools filter -i 'FILTER=="PASS" && (SVLEN < -50 || SVLEN > 50)' ${outRawVcf} | bcftools sort -Oz -o ${outFilteredVcf}  -
+    bcftools filter -i "${params.svimFilter}" ${outRawVcf} | bcftools sort -Oz -o ${outFilteredVcf}  -
     bcftools index ${outFilteredVcf}
     """
 
@@ -60,26 +68,47 @@ process svimCall {
 }
 
 process snifflesCall {
-    publishDir  "${baseOutdir}/sniffles_calls", mode: 'copy'
+    publishDir  "${baseOutdir}/sv/sniffles_calls", mode: 'copy'
     input:
         path bam
         path ref
     output:
-        path '*sniffles.raw*'
+        path '*sniffles.raw*', emit: sniffles_vcf
     script:
-    def sampleName = params.name ? "${params.name}.sniffles.raw.vcf" : "sniffles.raw.vcf"
+    def vcfName = params.name ? "${params.name}.sniffles.raw.vcf" : "sniffles.raw.vcf"
     def cluster = params.snifflesCluster ? "--cluster" : ""
     def genotype = params.snifflesGenotype ? "--genotype" : ""
 
 
     """ 
         sniffles -t ${task.cpus} -m ${bam} -s ${params.snifflesMinSupport} \
-        --cluster_support ${params.snifflesClusterSupport} -v ${sampleName}  \
+        --cluster_support ${params.snifflesClusterSupport} -v ${vcfName}  \
         -l ${params.snifflesMinLength} -r ${params.snifflesMinSeqSize} \
         ${cluster} ${genotype} ${params.snifflesAdvanced}
-        bcftools sort -T ${params.tmpDir} -Oz -o ${sampleName}.gz ${sampleName} && tabix ${sampleName}.gz
+        bcftools sort -T ${params.tmpDir} -Oz -o ${vcfName}.gz ${vcfName} && tabix ${vcfName}.gz
     """
 
+}
+
+process highConfCalls {
+    publishDir  "${baseOutdir}/sv/high_conf", mode: 'copy'
+    input:
+        path svim_calls
+        path sniffles_calls
+    output:
+        path '*highconf.vcf.gz*', emit: highconf_vcf
+    script:
+    def vcfName = params.name ? "${params.name}.highconf.vcf" :"highconf.vcf" 
+    def sameStrand = params.sameStrand ? 1 : 0
+    def sameType = params.sameType ? 1 : 0
+    def estDist = params.estDist ? 1 : 0
+
+    """ 
+    SURVIVOR merge <(ls ${svim_calls} ${sniffles_calls}) ${params.isecDist}\
+    ${params.callerSupport} ${sameStrand} ${sameType} ${estDist}\
+    ${params.isecMinLength} ${vcfName}
+    bcftools sort -Oz  -o ${vcfName}.gz ${vcfName} &&  bcftools index ${vcfName}.gz
+    """
 }
 
 workflow {
@@ -88,4 +117,7 @@ workflow {
     alignReads(reads, ref)
     svimCall(alignReads.out.alignment, ref)
     snifflesCall(alignReads.out.alignment, ref)
+    svimCall.out.svim_vcf | map { it.findAll { it =~/filtered.vcf.gz$/ }} | set { svim_filtered } 
+    snifflesCall.out.sniffles_vcf | map { it.findAll { it =~/raw.vcf.gz$/ }} | set { sniffles_calls } 
+    highConfCalls(svim_filtered, sniffles_calls)
 }
