@@ -24,50 +24,69 @@ process alignReads {
         path 'lowmq*'
     script:
     def bamName = params.name ? "${params.name}.alignment.sort.bam" :"alignment.sort.bam" 
-
     """
-    minimap2 --cs --MD -t ${task.cpus} -ax map-ont ${ref} ${reads} | samtools sort -o ${bamName} - 
-    samtools view -h ${bamName} | awk '\$1 ~ /^@/ || \$5<5 '  | samtools sort -o lowmq.sort.bam -
-    samtools depth lowmq.sort.bam > lowq.depth
-    SURVIVOR bincov ${params.windowSize} ${params.lowQualSupport} 2 > lowmq_regions.bed
+        minimap2 --cs --MD -t ${task.cpus} -ax map-ont ${ref} ${reads} | samtools sort -o ${bamName} - 
+        samtools view -h ${bamName} | awk '\$1 ~ /^@/ || \$5<5 '  | samtools sort -o lowmq.sort.bam -
+        samtools depth lowmq.sort.bam > lowq.depth
+        SURVIVOR bincov ${params.windowSize} ${params.lowQualSupport} 2 > lowmq_regions.bed
     """
 
 }
 
-process svimCall {
+process svimCalls {
     publishDir "${baseOutdir}/sv/svim_calls", mode: 'copy'
     input:
         path bam
         path ref
+        file regions
     output:
         path 'svim.results.tar.gz', emit: svim_dir
         path "**.vcf.gz*", emit: svim_vcf
         path "*.log", emit: svim_log
         path "*.png", emit: svim_images
     script:
-    def (sampleCmd, outRawVcf, outBndVcf, outFilteredVcf) = params.name ? 
-        [ "--sample ${params.name}", "${params.name}.svim.raw.vcf.gz",
-        "${params.name}.svim.bnd.vcf.gz", "${params.name}.svim.filtered.vcf.gz",
-        ] 
-        : 
-        [ "", "svim.raw.vcf.gz", "svim.bnd.vcf.gz", "svim.filtered.vcf.gz"]
+        def (sampleCmd, outRawVcf, outBndVcf, outFilteredVcf) = params.name ? 
+            [ "--sample ${params.name}", "${params.name}.svim.raw.vcf.gz",
+            "${params.name}.svim.bnd.vcf.gz", "${params.name}.svim.filtered.vcf.gz",
+            ] 
+            : 
+            [ "", "svim.raw.vcf.gz", "svim.bnd.vcf.gz", "svim.filtered.vcf.gz"]
 
-    """
-    svim alignment --read_names ${sampleCmd} svim_calls ${bam} ${ref}
-    tar czf svim.results.tar.gz svim_calls 
-    mv svim_calls/*{log,png} .
-    bcftools sort -T ${params.tmpDir} -Oz -o ${outRawVcf} svim_calls/variants.vcf 
-    bcftools index ${outRawVcf}
-    bcftools filter -i 'FILTER=="PASS" && SVTYPE=="BND"' ${outRawVcf} | bcftools sort -Oz  -o ${outBndVcf} - 
-    bcftools index ${outBndVcf}
-    bcftools filter -i "${params.svimFilter}" ${outRawVcf} | bcftools sort -Oz -o ${outFilteredVcf}  -
-    bcftools index ${outFilteredVcf}
-    """
 
+        """
+            svim alignment --read_names ${sampleCmd} svim_calls ${bam} ${ref}
+            tar czf svim.results.tar.gz svim_calls 
+            mv svim_calls/*{log,png} .
+            bcftools sort -T ${params.tmpDir} -Oz -o ${outRawVcf} svim_calls/variants.vcf 
+            bcftools filter -i 'FILTER=="PASS" && SVTYPE=="BND"' ${outRawVcf} | bcftools sort -Oz  -o ${outBndVcf} - 
+            bcftools filter -i "${params.svimFilter}" ${outRawVcf} | bcftools sort -Oz -o ${outFilteredVcf}  -
+        """
 
 }
 
-process snifflesCall {
+process extractRegions {
+    publishDir "${baseOutdir}/isec_regions", mode: 'copy'
+    
+    input:
+        path vcf
+        path regions
+
+    when: params.regions
+
+    output:
+        path "*isec*"
+    script:
+        def outBed = vcf.name.replace("vcf.gz", "isec.bed")
+        def outVcf = vcf.name.replace("vcf.gz", "isec.vcf.gz")
+
+        """
+        intersectBed -a ${regions} -b ${vcf} -wb  > ${outBed}
+        cut -f7 ${outBed} > id.lst
+        bcftools filter -i 'ID=@id.lst' ${vcf} | bcftools sort -T ${params.tmpDir} -Oz -o ${outVcf}
+        """
+}
+        
+process snifflesCalls {
     publishDir  "${baseOutdir}/sv/sniffles_calls", mode: 'copy'
     input:
         path bam
@@ -96,7 +115,7 @@ process highConfCalls {
         path svim_calls
         path sniffles_calls
     output:
-        path '*highconf.vcf.gz*', emit: highconf_vcf
+        path '*highconf.vcf.gz', emit: highconf_vcf
     script:
     def vcfName = params.name ? "${params.name}.highconf.vcf" :"highconf.vcf" 
     def sameStrand = params.sameStrand ? 1 : 0
@@ -111,13 +130,32 @@ process highConfCalls {
     """
 }
 
+
+
+
+
+
 workflow {
-    reads = Channel.fromPath(params.reads).ifEmpty { error "Please specify FASTQ files to use for variant calling" } 
+    if (params.sra) {
+        reads = Channel.fromSRA(params.sra)
+    } else {
+        reads = Channel.fromPath(params.reads).ifEmpty { error "Please specify FASTQ files to use for variant calling" } 
+    }
+
     ref = Channel.fromPath(params.ref).ifEmpty { error "Please specify a reference file to use for alignment (can be remote file https/ftp)" } 
+    regions = params.regions ? Channel.fromPath(params.regions) : Channel.from("NO_FILE")
     alignReads(reads, ref)
-    svimCall(alignReads.out.alignment, ref)
-    snifflesCall(alignReads.out.alignment, ref)
-    svimCall.out.svim_vcf | map { it.findAll { it =~/filtered.vcf.gz$/ }} | set { svim_filtered } 
-    snifflesCall.out.sniffles_vcf | map { it.findAll { it =~/raw.vcf.gz$/ }} | set { sniffles_calls } 
+    svimCalls(alignReads.out.alignment, ref, regions)
+    snifflesCalls(alignReads.out.alignment, ref)
+    svimCalls.out.svim_vcf | map { it.findAll { it =~/filtered.vcf.gz$/ }} | set { svim_filtered } 
+    snifflesCalls.out.sniffles_vcf | map { it.findAll { it =~/raw.vcf.gz$/ }} | set { sniffles_calls } 
     highConfCalls(svim_filtered, sniffles_calls)
+
+    //TODO: fix join
+    if (params.regions) {
+        // svimCalls.out.svim_vcf | join(snifflesCalls.out.sniffles_vcf) | flatten | filter { it =~ /(bnd|filtered|raw).vcf.gz$/ } | set { vcfs }
+        // svimCalls.out.svim_vcf | flatten | filter { it =~ /(bnd|filtered|raw).vcf.gz$/ } | set { vcfs }
+        svimCalls.out.svim_vcf | flatten | view { println it }  | set { vcfs }
+        extractRegions(vcfs, Channel.fromPath(params.regions))
+    }
 }
