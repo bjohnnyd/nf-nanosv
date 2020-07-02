@@ -13,9 +13,6 @@ nextflow.preview.dsl = 2
 
 
 def baseOutdir = params.name ? "${params.outdir}/${params.name}" : "${params.outdir}"
-println baseOutdir
-println params.ref
-println params.reads
 
 process alignReads {
     publishDir  "${baseOutdir}/alignment", mode: 'copy'
@@ -25,21 +22,40 @@ process alignReads {
     output:
         path 'alignment.sort.bam', emit: alignment
 
-    "minimap2 -t ${task.cpus} -ax map-ont -MD ${ref} ${reads} | samtools sort -o alignment.sort.bam - "
+    "minimap2 --cs --MD -t ${task.cpus} -ax map-ont ${ref} ${reads} | samtools sort -o alignment.sort.bam - "
 
 }
 
 process svimCall {
-    publishDir "${baseOutdir}", mode: 'copy'
+    publishDir "${baseOutdir}/svim_calls", mode: 'copy'
     input:
         path bam
         path ref
     output:
-        path 'svim_calls'
+        path 'svim.results.tar.gz', emit: svim_dir
+        path "**.vcf.gz*", emit: svim_vcf
+        path "*.log", emit: svim_log
+        path "*.png", emit: svim_images
     script:
-    def sample_name = params.name ? "--sample ${params.name}" : ""
+    def (sampleCmd, outRawVcf, outBndVcf, outFilteredVcf) = params.name ? 
+        [ "--sample ${params.name}", "${params.name}.svim.raw.vcf.gz",
+        "${params.name}.svim.bnd.vcf.gz", "${params.name}.svim.filtered.vcf.gz",
+        ] 
+        : 
+        [ "", "svim.raw.vcf.gz", "svim.bnd.vcf.gz", "svim.filtered.vcf.gz"]
 
-    "svim alignment --read_names ${sample_name} svim_calls ${bam} ${ref}"
+    """
+    svim alignment --read_names ${sampleCmd} svim_calls ${bam} ${ref}
+    tar czf svim.results.tar.gz svim_calls 
+    mv svim_calls/*{log,png} .
+    bcftools sort -T ${params.tmpDir} -Oz -o ${outRawVcf} svim_calls/variants.vcf 
+    bcftools index ${outRawVcf}
+    bcftools filter -i 'FILTER=="PASS" && SVTYPE=="BND"' ${outRawVcf} | bcftools sort -Oz  -o ${outBndVcf} - 
+    bcftools index ${outBndVcf}
+    bcftools filter -i 'FILTER=="PASS" && (SVLEN < -50 || SVLEN > 50)' ${outRawVcf} | bcftools sort -Oz -o ${outFilteredVcf}  -
+    bcftools index ${outFilteredVcf}
+    """
+
 
 }
 
@@ -51,17 +67,17 @@ process snifflesCall {
     output:
         path '*sniffles.raw*'
     script:
-    def sample_name = params.name ? "-v ${params.name}.sniffles.raw.vcf" : "sniffles.raw.vcf"
+    def sampleName = params.name ? "${params.name}.sniffles.raw.vcf" : "sniffles.raw.vcf"
     def cluster = params.snifflesCluster ? "--cluster" : ""
     def genotype = params.snifflesGenotype ? "--genotype" : ""
 
 
     """ 
         sniffles -t ${task.cpus} -m ${bam} -s ${params.snifflesMinSupport} \
-        --cluster_support ${params.snifflesClusterSupport}  \
+        --cluster_support ${params.snifflesClusterSupport} -v ${sampleName}  \
         -l ${params.snifflesMinLength} -r ${params.snifflesMinSeqSize} \
-        ${cluster} ${genotype} ${sample_name} ${params.snifflesAdvanced}
-        bcftools sort -Oz -o ${sample_name}.gz ${sample_name} && tabix ${sample_name}.gz
+        ${cluster} ${genotype} ${params.snifflesAdvanced}
+        bcftools sort -T ${params.tmpDir} -Oz -o ${sampleName}.gz ${sampleName} && tabix ${sampleName}.gz
     """
 
 }
