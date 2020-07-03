@@ -64,25 +64,6 @@ process svimCalls {
 
 }
 
-process extractRegions {
-    publishDir "${baseOutdir}/isec_regions", mode: 'copy'
-    
-    input:
-        path vcf
-        each regions
-
-    output:
-        path "*isec*"
-    script:
-        def outBed = vcf.name.replace("vcf.gz", "isec.bed")
-        def outVcf = vcf.name.replace("vcf.gz", "isec.vcf.gz")
-
-        """
-        intersectBed -a ${regions} -b ${vcf} -wb  > ${outBed}
-        cut -f7 ${outBed} > id.lst
-        bcftools filter -i 'ID=@id.lst' ${vcf} | bcftools sort -T ${params.tmpDir} -Oz -o ${outVcf}
-        """
-}
         
 process snifflesCalls {
     publishDir  "${baseOutdir}/sv/sniffles_calls", mode: 'copy'
@@ -128,8 +109,45 @@ process highConfCalls {
     """
 }
 
+process extractRegions {
+    publishDir "${baseOutdir}/isec_regions", mode: 'copy'
+    
+    input:
+        path vcf
+        each regions
 
+    output:
+        path "*isec*", emit: isec_vcfs
+    script:
+        def outBed = vcf.name.replace("vcf.gz", "isec.bed")
+        def outVcf = vcf.name.replace("vcf.gz", "isec.vcf.gz")
 
+        """
+            intersectBed -a ${regions} -b ${vcf} -wb  > ${outBed}
+            cut -f7 ${outBed} > id.lst
+            bcftools filter -i 'ID=@id.lst' ${vcf} | bcftools sort -T ${params.tmpDir} -Oz -o ${outVcf}
+        """
+}
+
+process goldCompare {
+    publishDir "${baseOutdir}/gold_compare", mode: 'copy'
+    
+    input:
+        path calls
+        path gold_set
+
+    output:
+        path "*gold.shared.vcf.gz", emit: gold_shared_vcfs
+    script:
+        def outVcf = calls.name.replaceAll("highconf.*.vcf.gz", "gold.shared.vcf")
+
+        """
+            SURVIVOR merge <(ls ${calls} ${gold_set}) ${params.isecDist}\
+            ${params.callerSupport} ${sameStrand} ${sameType} ${estDist}\
+            ${params.isecMinLength} ${outVcf}
+            bcftools sort -Oz  -o ${outVcf}.gz ${outVcf} &&  bcftools index ${outVcf}.gz
+        """
+}
 
 
 
@@ -152,5 +170,15 @@ workflow {
     if (params.regions) {
         svimCalls.out.svim_vcf | merge(snifflesCalls.out.sniffles_vcf) | merge(highConfCalls.out.highconf_vcf) | flatten |  filter { it =~ /(highconf|bnd|filtered|raw).vcf.gz$/ } | set { vcfs }
         extractRegions(vcfs, Channel.fromPath(params.regions))
+    }
+
+    if (params.goldSet) {
+        if (params.regions) { 
+            extractRegions.out.isec_vcfs | flatten() | filter { ~/highconf.isec.vcf.gz$/ } | set { gold_comp_vcf }
+        } else {
+            highConfCalls.out.highconf_vcf | set { gold_comp_vcf }
+        }
+        goldSetShared(gold_comp_vcf, Channel.fromPath(params.goldSet))
+        
     }
 }
