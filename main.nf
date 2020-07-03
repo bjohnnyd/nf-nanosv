@@ -140,6 +140,9 @@ process goldCompare {
         path "*gold.shared.vcf.gz", emit: gold_shared_vcfs
     script:
         def outVcf = calls.name.replaceAll("highconf.*.vcf.gz", "gold.shared.vcf")
+        def sameStrand = params.sameStrand ? 1 : 0
+        def sameType = params.sameType ? 1 : 0
+        def estDist = params.estDist ? 1 : 0
 
         """
             SURVIVOR merge <(ls ${calls} ${gold_set}) ${params.isecDist}\
@@ -178,7 +181,7 @@ workflow {
         } else {
             highConfCalls.out.highconf_vcf | set { gold_comp_vcf }
         }
-        goldSetShared(gold_comp_vcf, Channel.fromPath(params.goldSet))
+        goldCompare(gold_comp_vcf, Channel.fromPath(params.goldSet))
         
     }
 }
