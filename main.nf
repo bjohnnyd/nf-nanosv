@@ -69,9 +69,7 @@ process extractRegions {
     
     input:
         path vcf
-        path regions
-
-    when: params.regions
+        each regions
 
     output:
         path "*isec*"
@@ -151,11 +149,8 @@ workflow {
     snifflesCalls.out.sniffles_vcf | map { it.findAll { it =~/raw.vcf.gz$/ }} | set { sniffles_calls } 
     highConfCalls(svim_filtered, sniffles_calls)
 
-    //TODO: fix join
     if (params.regions) {
-        // svimCalls.out.svim_vcf | join(snifflesCalls.out.sniffles_vcf) | flatten | filter { it =~ /(bnd|filtered|raw).vcf.gz$/ } | set { vcfs }
-        // svimCalls.out.svim_vcf | flatten | filter { it =~ /(bnd|filtered|raw).vcf.gz$/ } | set { vcfs }
-        svimCalls.out.svim_vcf | flatten | view { println it }  | set { vcfs }
+        svimCalls.out.svim_vcf | merge(snifflesCalls.out.sniffles_vcf) | merge(highConfCalls.out.highconf_vcf) | flatten |  filter { it =~ /(highconf|bnd|filtered|raw).vcf.gz$/ } | set { vcfs }
         extractRegions(vcfs, Channel.fromPath(params.regions))
     }
 }
