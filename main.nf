@@ -27,7 +27,7 @@ process alignReads {
         minimap2 --cs --MD -t ${task.cpus} -ax map-ont ${ref} ${reads} | samtools sort -o ${bamName} - 
         samtools view -h ${bamName} | awk '\$1 ~ /^@/ || \$5<5 '  | samtools sort -o lowmq.sort.bam -
         samtools depth lowmq.sort.bam > lowq.depth
-        SURVIVOR bincov ${params.windowSize} ${params.lowQualSupport} 2 > lowmq_regions.bed
+        SURVIVOR bincov lowq.depth ${params.windowSize} ${params.lowQualSupport} > lowmq_regions.bed
     """
 
 }
@@ -57,8 +57,8 @@ process svimCalls {
             tar czf svim.results.tar.gz svim_calls 
             mv svim_calls/*{log,png} .
             bcftools sort -T ${params.tmpDir} -Oz -o ${outRawVcf} svim_calls/variants.vcf 
-            bcftools filter -i 'FILTER=="PASS" && SVTYPE=="BND"' ${outRawVcf} | bcftools sort -Oz  -o ${outBndVcf} - 
-            bcftools filter -i "${params.svimFilter}" ${outRawVcf} | bcftools sort -Oz -o ${outFilteredVcf}  -
+            bcftools filter -i 'FILTER=="PASS" && SVTYPE=="BND"' ${outRawVcf} | bcftools sort -T ${params.tmpDir} -Oz  -o ${outBndVcf} - 
+            bcftools filter -i "${params.svimFilter}" ${outRawVcf} | bcftools sort -T ${params.tmpDir} -Oz -o ${outFilteredVcf}  -
         """
 
 }
@@ -147,7 +147,7 @@ process goldCompare {
             SURVIVOR merge <(ls ${calls} ${gold_set}) ${params.isecDist}\
             ${params.callerSupport} ${sameStrand} ${sameType} ${estDist}\
             ${params.isecMinLength} ${outVcf}
-            bcftools sort -Oz  -o ${outVcf}.gz ${outVcf} &&  bcftools index ${outVcf}.gz
+            bcftools sort -T ${params.tmpDir} -Oz  -o ${outVcf}.gz ${outVcf} &&  bcftools index ${outVcf}.gz
         """
 }
 
