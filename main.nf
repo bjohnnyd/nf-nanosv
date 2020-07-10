@@ -157,7 +157,15 @@ workflow {
     if (params.sra) {
         reads = Channel.fromSRA(params.sra)
     } else {
-        reads = Channel.fromPath(params.reads).ifEmpty { error "Please specify FASTQ files to use for variant calling" } 
+        if (!params.reads) {
+            error "Please provide path to FASTQ with --reads <path/to/fastq>"
+        } else {
+            reads = Channel.fromPath(params.reads).ifEmpty { error "Please specify FASTQ files to use for variant calling" } 
+        }
+    }
+
+    if (!params.name) {
+        println "You have not provided a name for this run please make sure the output is unique as the previous run will be overwritten"
     }
 
     ref = Channel.fromPath(params.ref).ifEmpty { error "Please specify a reference file to use for alignment (can be remote file https/ftp)" } 
