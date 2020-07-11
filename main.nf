@@ -70,7 +70,7 @@ process snifflesCalls {
         path bam
         path ref
     output:
-        path '*sniffles.raw*', emit: sniffles_vcf
+        path '*sniffles.raw.vcf.gz*', emit: sniffles_vcf
     script:
     def vcfName = params.name ? "${params.name}.sniffles.raw.vcf" : "sniffles.raw.vcf"
     def cluster = params.snifflesCluster ? "--cluster" : ""
@@ -101,10 +101,12 @@ process highConfCalls {
     def estDist = params.estDist ? 1 : 0
 
     """ 
-    SURVIVOR merge <(ls ${svim_calls} ${sniffles_calls}) ${params.isecDist}\
-    ${params.callerSupport} ${sameStrand} ${sameType} ${estDist}\
-    ${params.isecMinLength} ${vcfName}
-    bcftools sort -Oz  -o ${vcfName}.gz ${vcfName} &&  bcftools index ${vcfName}.gz
+        bcftools view -Ov ${svim_calls} > svim_calls.vcf
+        bcftools view -Ov ${sniffles_calls} > sniffles_calls.vcf
+        SURVIVOR merge <(ls ${svim_calls} ${sniffles_calls}) ${params.isecDist}\
+        ${params.callerSupport} ${sameStrand} ${sameType} ${estDist}\
+        ${params.isecMinLength} ${vcfName}
+        bcftools sort -Oz  -o ${vcfName}.gz ${vcfName} &&  bcftools index ${vcfName}.gz
     """
 }
 
@@ -144,7 +146,9 @@ process goldCompare {
         def estDist = params.estDist ? 1 : 0
 
         """
-            SURVIVOR merge <(ls ${calls} ${gold_set}) ${params.isecDist}\
+            bcftools view -Ov ${calls} > calls.vcf
+            bcftools view -Ov ${gold_set} > gold_set.vcf
+            SURVIVOR merge <(ls calls.vcf gold_set.vcf) ${params.isecDist}\
             ${params.callerSupport} ${sameStrand} ${sameType} ${estDist}\
             ${params.isecMinLength} ${outVcf}
             bcftools sort -T ${params.tmpDir} -Oz  -o ${outVcf}.gz ${outVcf} &&  bcftools index ${outVcf}.gz
