@@ -103,7 +103,7 @@ process highConfCalls {
     """ 
         bcftools view -Ov ${svim_calls} > svim_calls.vcf
         bcftools view -Ov ${sniffles_calls} > sniffles_calls.vcf
-        SURVIVOR merge <(ls ${svim_calls} ${sniffles_calls}) ${params.isecDist}\
+        SURVIVOR merge <(ls svim_calls.vcf sniffles_calls.vcf) ${params.isecDist}\
         ${params.callerSupport} ${sameStrand} ${sameType} ${estDist}\
         ${params.isecMinLength} ${vcfName}
         bcftools sort -Oz  -o ${vcfName}.gz ${vcfName} &&  bcftools index ${vcfName}.gz
