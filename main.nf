@@ -12,6 +12,7 @@ nextflow.preview.dsl = 2
 
 
 def baseOutdir = params.name ? "${params.outdir}/${params.name}" : "${params.outdir}"
+String.metaClass.isEmpty = { delegate.allWhitespace }
 
 process alignReads {
     publishDir  "${baseOutdir}/alignment", mode: 'copy'
@@ -20,17 +21,29 @@ process alignReads {
         path ref
     output:
         path '*alignment.sort.bam', emit: alignment
-        path 'lowmq*'
     script:
     def bamName = params.name ? "${params.name}.alignment.sort.bam" :"alignment.sort.bam" 
     """
         minimap2 --cs --MD -t ${task.cpus} -ax map-ont ${ref} ${reads} | samtools sort -o ${bamName} - 
-        samtools view -h ${bamName} | awk '\$1 ~ /^@/ || \$5<5 '  | samtools sort -o lowmq.sort.bam -
-        samtools depth lowmq.sort.bam > lowq.depth
-        SURVIVOR bincov lowq.depth ${params.windowSize} ${params.lowQualSupport} > lowmq_regions.bed
     """
 
 }
+
+process getLowMapQ {
+    publishDir  "${baseOutdir}/alignment/lowmq", mode: 'copy'
+    input:
+        path alignment
+    output:
+        path '*lowmq*'
+    script:
+    def outName = params.name ? "${params.name}.lowmq" :"lowmq" 
+    """
+        samtools view -h ${alignment} | awk '\$1 ~ /^@/ || \$5<5 '  | samtools sort -o ${outName}.sort.bam -
+        samtools depth ${outName}.sort.bam > lowq.depth
+        SURVIVOR bincov lowq.depth ${params.windowSize} ${params.lowQualSupport} > ${outName}.bed
+    """
+}
+
 
 process svimCalls {
     publishDir "${baseOutdir}/sv/svim_calls", mode: 'copy'
@@ -43,13 +56,17 @@ process svimCalls {
         path "**.vcf.gz*", emit: svim_vcf
         path "*.log", emit: svim_log
         path "*.png", emit: svim_images
+        path "*bnd*", emit: bnd_results
     script:
-        def (sampleCmd, outRawVcf, outBndVcf, outFilteredVcf) = params.name ? 
+        def (sampleCmd, outRawVcf, outBndVcf, outFilteredVcf, outBndInfo, outBndBam, outBndBedPe) = params.name ? 
             [ "--sample ${params.name}", "${params.name}.svim.raw.vcf.gz",
             "${params.name}.svim.bnd.vcf.gz", "${params.name}.svim.filtered.vcf.gz",
+            "${params.name}.bnd.lst", "${params.name}.bnd.sort.bam", "${params.name}.bnd.sort.bedpe"
             ] 
             : 
-            [ "", "svim.raw.vcf.gz", "svim.bnd.vcf.gz", "svim.filtered.vcf.gz"]
+            [ "", "svim.raw.vcf.gz", "svim.bnd.vcf.gz", "svim.filtered.vcf.gz",
+            "bnd.lst", "bnd.sort.bam",  "bnd.sort.bedpe"
+            ]
 
 
         """
@@ -57,8 +74,14 @@ process svimCalls {
             tar czf svim.results.tar.gz svim_calls 
             mv svim_calls/*{log,png} .
             bcftools sort -T ${params.tmpDir} -Oz -o ${outRawVcf} svim_calls/variants.vcf 
-            bcftools filter -i 'FILTER=="PASS" && SVTYPE=="BND"' ${outRawVcf} | bcftools sort -T ${params.tmpDir} -Oz  -o ${outBndVcf} - 
+            bcftools filter -i 'FILTER=="PASS" && SVTYPE=="BND" && SUPPORT >= 1 && QUAL >= 1' ${outRawVcf} | bcftools sort -T ${params.tmpDir} -Oz  -o ${outBndVcf} - 
             bcftools filter -i "${params.svimFilter}" ${outRawVcf} | bcftools sort -T ${params.tmpDir} -Oz -o ${outFilteredVcf}  -
+            bcftools query -f '%ID\\t%CHROM\\t%POS\\t%ALT\\t%READS\\t%QUAL\n' ${outBndVcf} | sort -k6nr > ${outBndInfo}
+            cut -f5 ${outBndInfo} | tr ',' '\\n' > reads.lst
+            samtools view -H ${bam} > header.sam
+            samtools view ${bam} | grep -f reads.lst > alignments.sam
+            cat header.sam alignments.sam | samtools sort -o ${outBndBam} -
+            bamToBed -bedpe -cigar -i ${outBndBam} > ${outBndBedPe}
         """
 
 }
@@ -155,6 +178,29 @@ process goldCompare {
         """
 }
 
+process plotTopQual {
+    publishDir "${baseOutdir}/plots/top_qual", mode: 'copy'
+    
+    input:
+        path calls
+        path alignment
+        val topN
+
+    output:
+        path "*.png", emit: topQualPlots
+    script:
+        def runName = calls.name.replaceAll("highconf.vcf.gz", "")
+        def outName = runName.trim().length() == 0 ? "" : "${runName}"
+
+        """
+            samtools index ${alignment}
+            bcftools query -f '%ID\\t%CHROM\\t%POS\\t%SVLEN\\t%QUAL\\t%ALT\\n' ${calls} | sort -k5nr | head -${topN} | awk 'BEGIN {OFS="\\t";} {gsub("-","",\$4);gsub("(<|>)","",\$6);print \$1,\$2,\$3,\$3+\$4,\$4,\$5,\$6}' > variants.lst
+            parallel -j ${task.cpus} -C '\\t' "samplot plot -n '{1}-Q{5}' -b ${alignment} -o ${outName}{%}.png -c {2} -s {3} -e {4} -t {6}"  :::: <(cut -f1-4,6-7 variants.lst) 
+        """
+}
+    
+
+//TODO: Svim BND reads --> filter alignment bam --> bamtobedPe
 
 
 workflow {
@@ -175,11 +221,13 @@ workflow {
     ref = Channel.fromPath(params.ref).ifEmpty { error "Please specify a reference file to use for alignment (can be remote file https/ftp)" } 
     regions = params.regions ? Channel.fromPath(params.regions) : Channel.from("NO_FILE")
     alignReads(reads, ref)
+    getLowMapQ(alignReads.out.alignment)
     svimCalls(alignReads.out.alignment, ref, regions)
     snifflesCalls(alignReads.out.alignment, ref)
     svimCalls.out.svim_vcf | map { it.findAll { it =~/filtered.vcf.gz$/ }} | set { svim_filtered } 
     snifflesCalls.out.sniffles_vcf | map { it.findAll { it =~/raw.vcf.gz$/ }} | set { sniffles_calls } 
     highConfCalls(svim_filtered, sniffles_calls)
+    plotTopQual(highConfCalls.out.highconf_vcf, alignReads.out.alignment, params.topN)
 
     if (params.regions) {
         svimCalls.out.svim_vcf | merge(snifflesCalls.out.sniffles_vcf) | merge(highConfCalls.out.highconf_vcf) | flatten |  filter { it =~ /(highconf|bnd|filtered|raw).vcf.gz$/ } | set { vcfs }
