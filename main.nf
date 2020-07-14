@@ -73,9 +73,9 @@ process svimCalls {
             svim alignment --read_names ${sampleCmd} svim_calls ${bam} ${ref}
             tar czf svim.results.tar.gz svim_calls 
             mv svim_calls/*{log,png} .
-            bcftools sort -T ${params.tmpDir} -Oz -o ${outRawVcf} svim_calls/variants.vcf 
-            bcftools filter -i 'FILTER=="PASS" && SVTYPE=="BND" && SUPPORT >= 1 && QUAL >= 1' ${outRawVcf} | bcftools sort -T ${params.tmpDir} -Oz  -o ${outBndVcf} - 
-            bcftools filter -i "${params.svimFilter}" ${outRawVcf} | bcftools sort -T ${params.tmpDir} -Oz -o ${outFilteredVcf}  -
+            bcftools sort -Oz -o ${outRawVcf} svim_calls/variants.vcf 
+            bcftools filter -i 'FILTER=="PASS" && SVTYPE=="BND" && SUPPORT >= 1 && QUAL >= 1' ${outRawVcf} | bcftools sort -Oz  -o ${outBndVcf} - 
+            bcftools filter -i "${params.svimFilter}" ${outRawVcf} | bcftools sort -Oz -o ${outFilteredVcf}  -
             bcftools query -f '%ID\\t%CHROM\\t%POS\\t%ALT\\t%READS\\t%QUAL\n' ${outBndVcf} | sort -k6nr > ${outBndInfo}
             cut -f5 ${outBndInfo} | tr ',' '\\n' > reads.lst
             samtools view -H ${bam} > header.sam
@@ -105,7 +105,7 @@ process snifflesCalls {
         --cluster_support ${params.snifflesClusterSupport} -v ${vcfName}  \
         -l ${params.snifflesMinLength} -r ${params.snifflesMinSeqSize} \
         ${cluster} ${genotype} ${params.snifflesAdvanced}
-        bcftools sort -T ${params.tmpDir} -Oz -o ${vcfName}.gz ${vcfName} && tabix ${vcfName}.gz
+        bcftools sort -Oz -o ${vcfName}.gz ${vcfName} && tabix ${vcfName}.gz
     """
 
 }
@@ -149,7 +149,7 @@ process extractRegions {
         """
             intersectBed -a ${regions} -b ${vcf} -wb  > ${outBed}
             cut -f7 ${outBed} > id.lst
-            bcftools filter -i 'ID=@id.lst' ${vcf} | bcftools sort -T ${params.tmpDir} -Oz -o ${outVcf}
+            bcftools filter -i 'ID=@id.lst' ${vcf} | bcftools sort -Oz -o ${outVcf}
         """
 }
 
@@ -174,7 +174,7 @@ process goldCompare {
             SURVIVOR merge <(ls calls.vcf gold_set.vcf) ${params.isecDist}\
             ${params.callerSupport} ${sameStrand} ${sameType} ${estDist}\
             ${params.isecMinLength} ${outVcf}
-            bcftools sort -T ${params.tmpDir} -Oz  -o ${outVcf}.gz ${outVcf} &&  bcftools index ${outVcf}.gz
+            bcftools sort -Oz  -o ${outVcf}.gz ${outVcf} &&  bcftools index ${outVcf}.gz
         """
 }
 
