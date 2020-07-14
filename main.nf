@@ -79,7 +79,7 @@ process svimCalls {
             bcftools query -f '%ID\\t%CHROM\\t%POS\\t%ALT\\t%READS\\t%QUAL\n' ${outBndVcf} | sort -k6nr > ${outBndInfo}
             cut -f5 ${outBndInfo} | tr ',' '\\n' > reads.lst
             samtools view -H ${bam} > header.sam
-            samtools view ${bam} | grep -f reads.lst > alignments.sam
+            samtools view ${bam} | fgrep -w -f reads.lst > alignments.sam
             cat header.sam alignments.sam | samtools sort -o ${outBndBam} -
             bamToBed -bedpe -cigar -i ${outBndBam} > ${outBndBedPe}
         """
