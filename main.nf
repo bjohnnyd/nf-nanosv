@@ -185,13 +185,10 @@ process extractPlotRegions {
 
     output:
         path "variants.lst", emit: plot_regions
-    script:
-        def runName = calls.name.replaceAll("highconf.vcf.gz", "")
-        def outName = runName.trim().length() == 0 ? "" : "${runName}"
-
-        """
-            bcftools query -f '%ID\\t%CHROM\\t%POS\\t%SVLEN\\t%QUAL\\t%ALT\\n' ${calls} | sort -k5nr | head -${topN} | awk 'BEGIN {OFS="\\t";} {gsub("-","",\$4);gsub("(<|>)","",\$6);print \$1,\$2,\$3,\$3+\$4,\$4,\$5,\$6,FNR}' > variants.lst
-        """
+    shell:
+        '''
+            bcftools query -f '%ID\\t%CHROM\\t%POS\\t%SVLEN\\t%QUAL\\t%ALT\\n' !{calls} | sort -k5nr | awk -v topN=!{topN}  'BEGIN {OFS="\\t";} FNR <= topN {gsub("-","",$4);gsub("(<|>)","",$6);print $1,$2,$3,$3+$4,$4,$5,$6,FNR}' > variants.lst
+        '''
 }
     
 process plotTopQual {
