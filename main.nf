@@ -194,8 +194,8 @@ process plotTopQual {
 
         """
             samtools index ${alignment}
-            bcftools query -f '%ID\\t%CHROM\\t%POS\\t%SVLEN\\t%QUAL\\t%ALT\\n' ${calls} | sort -k5nr | head -${topN} | awk 'BEGIN {OFS="\\t";} {gsub("-","",\$4);gsub("(<|>)","",\$6);print \$1,\$2,\$3,\$3+\$4,\$4,\$5,\$6}' > variants.lst
-            parallel -j ${task.cpus} -C '\\t' "samplot plot -n '{1}-Q{5}' -b ${alignment} -o ${outName}{%}.png -c {2} -s {3} -e {4} -t {6}"  :::: <(cut -f1-4,6-7 variants.lst) 
+            bcftools query -f '%ID\\t%CHROM\\t%POS\\t%SVLEN\\t%QUAL\\t%ALT\\n' ${calls} | sort -k5nr | head -${topN} | awk 'BEGIN {OFS="\\t";} {gsub("-","",\$4);gsub("(<|>)","",\$6);print \$1,\$2,\$3,\$3+\$4,\$4,\$5,\$6,FNR}' > variants.lst
+            parallel -j ${task.cpus} -C '\\t' "samplot plot -n '{1}-Q{5}' -b ${alignment} -o ${outName}{7}.png -c {2} -s {3} -e {4} -t {6}"  :::: <(cut -f1-4,6-8 variants.lst)
         """
 }
     
