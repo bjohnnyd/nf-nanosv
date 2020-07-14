@@ -178,30 +178,41 @@ process goldCompare {
         """
 }
 
-process plotTopQual {
-    publishDir "${baseOutdir}/plots/top_qual", mode: 'copy'
-    
+process extractPlotRegions {
     input:
         path calls
-        path alignment
         val topN
 
     output:
-        path "*.png", emit: topQualPlots
+        path "variants.lst", emit: plot_regions
     script:
         def runName = calls.name.replaceAll("highconf.vcf.gz", "")
         def outName = runName.trim().length() == 0 ? "" : "${runName}"
 
         """
-            samtools index ${alignment}
             bcftools query -f '%ID\\t%CHROM\\t%POS\\t%SVLEN\\t%QUAL\\t%ALT\\n' ${calls} | sort -k5nr | head -${topN} | awk 'BEGIN {OFS="\\t";} {gsub("-","",\$4);gsub("(<|>)","",\$6);print \$1,\$2,\$3,\$3+\$4,\$4,\$5,\$6,FNR}' > variants.lst
-            parallel -j ${task.cpus} -C '\\t' "samplot plot -n '{1}-Q{5}' -b ${alignment} -o ${outName}{7}.png -c {2} -s {3} -e {4} -t {6}"  :::: <(cut -f1-4,6-8 variants.lst)
         """
 }
     
+process plotTopQual {
+    publishDir "${baseOutdir}/plots/top_qual", mode: 'copy'
+    
+    input:
+        each path(alignment)
+        val variant_row
 
-//TODO: Svim BND reads --> filter alignment bam --> bamtobedPe
+    output:
+        path "*.png", emit: topQualPlots
+    script:
+        def runName = alignment.name.replaceAll("alignment.sort.bam", "")
+        def outName = runName.trim().length() == 0 ? "" : "${runName}"
+        def(id, chrom, start, end, qual, type, rank) = variant_row.tokenize(',')
 
+        """
+            samtools index ${alignment}
+            samplot plot -n '${id}-Q${qual}' -b ${alignment} -o ${outName}${rank}.png -c ${chrom} -s ${start} -e ${end} -t ${type}
+        """
+}
 
 workflow {
     if (params.sra) {
@@ -220,6 +231,8 @@ workflow {
 
     ref = Channel.fromPath(params.ref).ifEmpty { error "Please specify a reference file to use for alignment (can be remote file https/ftp)" } 
     regions = params.regions ? Channel.fromPath(params.regions) : Channel.from("NO_FILE")
+
+    // Main
     alignReads(reads, ref)
     getLowMapQ(alignReads.out.alignment)
     svimCalls(alignReads.out.alignment, ref, regions)
@@ -227,8 +240,8 @@ workflow {
     svimCalls.out.svim_vcf | map { it.findAll { it =~/filtered.vcf.gz$/ }} | set { svim_filtered } 
     snifflesCalls.out.sniffles_vcf | map { it.findAll { it =~/raw.vcf.gz$/ }} | set { sniffles_calls } 
     highConfCalls(svim_filtered, sniffles_calls)
-    plotTopQual(highConfCalls.out.highconf_vcf, alignReads.out.alignment, params.topN)
 
+    // Optional
     if (params.regions) {
         svimCalls.out.svim_vcf | merge(snifflesCalls.out.sniffles_vcf) | merge(highConfCalls.out.highconf_vcf) | flatten |  filter { it =~ /(highconf|bnd|filtered|raw).vcf.gz$/ } | set { vcfs }
         extractRegions(vcfs, Channel.fromPath(params.regions))
@@ -243,4 +256,10 @@ workflow {
         goldCompare(gold_comp_vcf, Channel.fromPath(params.goldSet))
         
     }
+
+    // Plotting
+    extractPlotRegions(highConfCalls.out.highconf_vcf, params.topN)
+    extractPlotRegions.out.plot_regions | splitCsv(sep: '\t') | map { it.removeAt(4); it.join(",") }  | set { plot_info }
+    plotTopQual(alignReads.out.alignment, plot_info)
+
 }
