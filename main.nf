@@ -106,7 +106,7 @@ process snifflesCalls {
         --cluster_support ${params.snifflesClusterSupport} -v ${vcfName}  \
         -l ${params.snifflesMinLength} -r ${params.snifflesMinSeqSize} \
         ${cluster} ${genotype} ${params.snifflesAdvanced}
-        bcftools sort -Oz -o ${vcfName}.gz ${vcfName} && tabix ${vcfName}.gz
+        bcftools sort -Oz -o ${vcfName}.gz ${vcfName}
     """
 
 }
