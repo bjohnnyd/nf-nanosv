@@ -20,11 +20,12 @@ process alignReads {
         path reads
         path ref
     output:
-        path '*alignment.sort.bam', emit: alignment
+        tuple path('*alignment.sort.bam'), path('*alignment.sort.bam.bai'), emit: alignment
     script:
     def bamName = params.name ? "${params.name}.alignment.sort.bam" :"alignment.sort.bam" 
     """
         minimap2 --cs --MD -t ${task.cpus} -ax map-ont ${ref} ${reads} | samtools sort -o ${bamName} - 
+        samtools index ${bamName}
     """
 
 }
@@ -32,7 +33,7 @@ process alignReads {
 process getLowMapQ {
     publishDir  "${baseOutdir}/alignment/lowmq", mode: 'copy'
     input:
-        path alignment
+        tuple path(alignment), path(alignment_index)
     output:
         path '*lowmq*'
     script:
@@ -48,7 +49,7 @@ process getLowMapQ {
 process svimCalls {
     publishDir "${baseOutdir}/sv/svim_calls", mode: 'copy'
     input:
-        path bam
+        tuple path(bam), path(bam_index)
         path ref
         file regions
     output:
@@ -73,13 +74,13 @@ process svimCalls {
             svim alignment --read_names ${sampleCmd} svim_calls ${bam} ${ref}
             tar czf svim.results.tar.gz svim_calls 
             mv svim_calls/*{log,png} .
-            bcftools sort -Oz -o ${outRawVcf} svim_calls/variants.vcf 
-            bcftools filter -i 'FILTER=="PASS" && SVTYPE=="BND" && SUPPORT >= 1 && QUAL >= 1' ${outRawVcf} | bcftools sort -Oz  -o ${outBndVcf} - 
+            bcftools view -Oz -o ${outRawVcf} svim_calls/variants.vcf 
+            bcftools filter -i 'FILTER=="PASS" && SVTYPE=="BND" && SUPPORT >= ${params.bndSupport} && QUAL >= ${params.bndQual}' ${outRawVcf} | bcftools sort -Oz  -o ${outBndVcf} - 
             bcftools filter -i "${params.svimFilter}" ${outRawVcf} | bcftools sort -Oz -o ${outFilteredVcf}  -
-            bcftools query -f '%ID\\t%CHROM\\t%POS\\t%ALT\\t%READS\\t%QUAL\n' ${outBndVcf} | sort -k6nr > ${outBndInfo}
+            bcftools query -f '%ID\\t%CHROM\\t%POS\\t%ALT\\t%READS\\t%QUAL\\n' ${outBndVcf} | sort -k6nr > ${outBndInfo}
             cut -f5 ${outBndInfo} | tr ',' '\\n' > reads.lst
             samtools view -H ${bam} > header.sam
-            samtools view ${bam} | fgrep -w -f reads.lst > alignments.sam
+            samtools view ${bam} | fgrep -w -f reads.lst > alignments.sam || :
             cat header.sam alignments.sam | samtools sort -o ${outBndBam} -
             bamToBed -bedpe -cigar -i ${outBndBam} > ${outBndBedPe}
         """
@@ -90,7 +91,7 @@ process svimCalls {
 process snifflesCalls {
     publishDir  "${baseOutdir}/sv/sniffles_calls", mode: 'copy'
     input:
-        path bam
+        tuple path(bam), path(bam_index)
         path ref
     output:
         path '*sniffles.raw.vcf.gz*', emit: sniffles_vcf
@@ -195,8 +196,7 @@ process plotTopQual {
     publishDir "${baseOutdir}/plots/top_qual", mode: 'copy'
     
     input:
-        each path(alignment)
-        val variant_row
+        tuple path(alignment), path(alignment_index), val(variant_row)
 
     output:
         path "*.png", emit: topQualPlots
@@ -206,7 +206,6 @@ process plotTopQual {
         def(id, chrom, start, end, qual, type, rank) = variant_row.tokenize(',')
 
         """
-            samtools index ${alignment}
             samplot plot -n '${id}-Q${qual}' -b ${alignment} -o ${outName}${rank}.png -c ${chrom} -s ${start} -e ${end} -t ${type}
         """
 }
@@ -240,7 +239,7 @@ workflow {
 
     // Optional
     if (params.regions) {
-        svimCalls.out.svim_vcf | merge(snifflesCalls.out.sniffles_vcf) | merge(highConfCalls.out.highconf_vcf) | flatten |  filter { it =~ /(highconf|bnd|filtered|raw).vcf.gz$/ } | set { vcfs }
+        svimCalls.out.svim_vcf | merge(sniffles_calls) | merge(highConfCalls.out.highconf_vcf) | flatten |  filter { it =~ /(highconf|bnd|filtered|sniffles).vcf.gz$/ } | set { vcfs } 
         extractRegions(vcfs, Channel.fromPath(params.regions))
     }
 
@@ -257,6 +256,6 @@ workflow {
     // Plotting
     extractPlotRegions(highConfCalls.out.highconf_vcf, params.topN)
     extractPlotRegions.out.plot_regions | splitCsv(sep: '\t') | map { it.removeAt(4); it.join(",") }  | set { plot_info }
-    plotTopQual(alignReads.out.alignment, plot_info)
+    plotTopQual(alignReads.out.alignment.combine(plot_info))
 
 }
