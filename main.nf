@@ -94,7 +94,7 @@ process snifflesCalls {
         tuple path(bam), path(bam_index)
         path ref
     output:
-        path '*sniffles.raw.vcf.gz*', emit: sniffles_vcf
+        path '*sniffles.raw.vcf.gz', emit: sniffles_vcf
     script:
     def vcfName = params.name ? "${params.name}.sniffles.raw.vcf" : "sniffles.raw.vcf"
     def cluster = params.snifflesCluster ? "--cluster" : ""
@@ -234,12 +234,11 @@ workflow {
     svimCalls(alignReads.out.alignment, ref, regions)
     snifflesCalls(alignReads.out.alignment, ref)
     svimCalls.out.svim_vcf | map { it.findAll { it =~/filtered.vcf.gz$/ }} | set { svim_filtered } 
-    snifflesCalls.out.sniffles_vcf | map { it.findAll { it =~/raw.vcf.gz$/ }} | set { sniffles_calls } 
-    highConfCalls(svim_filtered, sniffles_calls)
+    highConfCalls(svim_filtered, snifflesCalls.out.sniffles_vcf)
 
     // Optional
     if (params.regions) {
-        svimCalls.out.svim_vcf | merge(sniffles_calls) | merge(highConfCalls.out.highconf_vcf) | flatten |  filter { it =~ /(highconf|bnd|filtered|sniffles).vcf.gz$/ } | set { vcfs } 
+        svimCalls.out.svim_vcf | merge(snifflesCalls.out.sniffles_vcf) | merge(highConfCalls.out.highconf_vcf) | flatten |  filter { it =~ /(highconf|bnd|filtered|sniffles).vcf.gz$/ } | set { vcfs } 
         extractRegions(vcfs, Channel.fromPath(params.regions))
     }
 
