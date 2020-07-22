@@ -7,9 +7,7 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 
-// TODO: survivor can be specified as `params.both.asInteger()`
 nextflow.preview.dsl = 2
-
 
 def baseOutdir = params.name ? "${params.outdir}/${params.name}" : "${params.outdir}"
 String.metaClass.isEmpty = { delegate.allWhitespace }
@@ -35,7 +33,8 @@ process getLowMapQ {
     input:
         tuple path(alignment), path(alignment_index)
     output:
-        path '*lowmq*'
+        path '*lowmq*', emit: lowmq
+        path '*lowmq.bed', emit: lowmq_bed
     script:
     def outName = params.name ? "${params.name}.lowmq" :"lowmq" 
     """
@@ -59,36 +58,29 @@ process svimCalls {
         path "*.png", emit: svim_images
         path "*bnd*", emit: bnd_results
     script:
-        def (sampleCmd, outRawVcf, outBndVcf, outFilteredVcf, outBndInfo, outBndBam, outBndBedPe) = params.name ? 
-            [ "--sample ${params.name}", "${params.name}.svim.raw.vcf.gz",
-            "${params.name}.svim.bnd.vcf.gz", "${params.name}.svim.filtered.vcf.gz",
-            "${params.name}.bnd.lst", "${params.name}.bnd.sort.bam", "${params.name}.bnd.sort.bedpe"
-            ] 
-            : 
-            [ "", "svim.raw.vcf.gz", "svim.bnd.vcf.gz", "svim.filtered.vcf.gz",
-            "bnd.lst", "bnd.sort.bam",  "bnd.sort.bedpe"
-            ]
-
+        def (sampleCmd, fullPrefix, bndPrefix) = params.name ?  [ "--sample ${params.name}", "${params.name}.svim",  "${params.name}.bnd"] : ["", "svim", "bnd"]
 
         """
             svim alignment --read_names ${sampleCmd} svim_calls ${bam} ${ref}
             tar czf svim.results.tar.gz svim_calls 
             mv svim_calls/*{log,png} .
-            bcftools view -Oz -o ${outRawVcf} svim_calls/variants.vcf 
-            bcftools filter -i 'FILTER=="PASS" && SVTYPE=="BND" && SUPPORT >= ${params.bndSupport} && QUAL >= ${params.bndQual}' ${outRawVcf} | bcftools sort -Oz  -o ${outBndVcf} - 
-            bcftools filter -i "${params.svimFilter}" ${outRawVcf} | bcftools sort -Oz -o ${outFilteredVcf}  -
-            bcftools query -f '%ID\\t%CHROM\\t%POS\\t%ALT\\t%READS\\t%QUAL\\n' ${outBndVcf} | sort -k6nr > ${outBndInfo}
-            cut -f5 ${outBndInfo} | tr ',' '\\n' > reads.lst
+            bcftools view -Oz -o ${fullPrefix}.raw.vcf.gz svim_calls/variants.vcf 
+            bcftools filter -i 'FILTER=="PASS" && SVTYPE=="BND" && SUPPORT >= ${params.bndSupport} && QUAL >= ${params.bndQual}' ${fullPrefix}.raw.vcf.gz | bcftools sort -Oz  -o ${fullPrefix}.bnd.vcf.gz - 
+            bcftools filter -i "${params.svimFilter}" ${fullPrefix}.raw.vcf.gz | bcftools sort -Oz -o ${fullPrefix}.filtered.vcf.gz  -
+            bcftools query -f '%ID\\t%CHROM\\t%POS\\t%ALT\\t%READS\\t%QUAL\\n' ${fullPrefix}.bnd.vcf.gz | sort -k6nr > ${bndPrefix}.lst
+            cut -f5 ${bndPrefix}.lst | tr ',' '\\n' > reads.lst
             samtools view -H ${bam} > header.sam
             samtools view ${bam} | fgrep -w -f reads.lst > alignments.sam || :
-            cat header.sam alignments.sam | samtools sort -o ${outBndBam} -
-            bamToBed -bedpe -cigar -i ${outBndBam} > ${outBndBedPe}
+            cat header.sam alignments.sam | samtools sort -o ${bndPrefix}.sort.bam -
+            bamToBed -bedpe -cigar -i ${bndPrefix}.sort.bam > ${bndPrefix}.sort.bedpe
         """
 
 }
 
         
 process snifflesCalls {
+    label 'variantCalling'
+
     publishDir  "${baseOutdir}/sv/sniffles_calls", mode: 'copy'
     input:
         tuple path(bam), path(bam_index)
@@ -116,10 +108,13 @@ process highConfCalls {
     input:
         path svim_calls
         path sniffles_calls
+        path lowmq_bed
     output:
-        path '*highconf.vcf.gz', emit: highconf_vcf
+        path '*highconf*vcf.gz*', emit: highconf
+        // path '*highconf.indel*', emit: highconf_indel
+        // path '*highconf.nolowmq*', emit: highconf_nolowmq
     script:
-    def vcfName = params.name ? "${params.name}.highconf.vcf" :"highconf.vcf" 
+    def vcfName = params.name ? "${params.name}.highconf" :"highconf" 
     def sameStrand = params.sameStrand ? 1 : 0
     def sameType = params.sameType ? 1 : 0
     def estDist = params.estDist ? 1 : 0
@@ -129,8 +124,17 @@ process highConfCalls {
         bcftools view -Ov ${sniffles_calls} > sniffles_calls.vcf
         SURVIVOR merge <(ls svim_calls.vcf sniffles_calls.vcf) ${params.isecDist}\
         ${params.callerSupport} ${sameStrand} ${sameType} ${estDist}\
-        ${params.isecMinLength} ${vcfName}
-        bcftools sort -Oz  -o ${vcfName}.gz ${vcfName} &&  bcftools index ${vcfName}.gz
+        ${params.isecMinLength} ${vcfName}.vcf
+
+        bcftools sort -Oz  -o ${vcfName}.vcf.gz ${vcfName}.vcf
+        bcftools index ${vcfName}.vcf.gz && bcftools tabix ${vcfName}.vcf.gz
+        intersectBed -v -a ${vcfName}.vcf.gz -b ${lowmq_bed} > highconf.nolowmq.body
+        cat <(bcftools view -h ${vcfName}.vcf.gz) highconf.nolowmq.body | bcftools sort -Oz -o ${vcfName}.nolowmq.vcf.gz -
+
+        bcftools filter -i 'SVTYPE == "DEL" || SVTYPE == "INS"' ${vcfName}.vcf.gz | bcftools sort -Oz -o ${vcfName}.indel.vcf.gz -
+        bcftools filter -i 'SVTYPE == "DEL" || SVTYPE == "INS"' ${vcfName}.nolowmq.vcf.gz | bcftools sort -Oz -o ${vcfName}.nolowmq.indel.vcf.gz -
+        bcftools index ${vcfName}.indel.vcf.gz && tabix ${vcfName}.indel.vcf.gz
+        bcftools index ${vcfName}.nolowmq.indel.vcf.gz && tabix ${vcfName}.nolowmq.indel.vcf.gz
     """
 }
 
@@ -151,10 +155,36 @@ process extractRegions {
             intersectBed -a ${regions} -b ${vcf} -wb  > ${outBed}
             cut -f7 ${outBed} > id.lst
             bcftools filter -i 'ID=@id.lst' ${vcf} | bcftools sort -Oz -o ${outVcf}
+            bcftools index ${outVcf} && tabix ${outVcf}
         """
 }
 
 process goldCompare {
+    publishDir "${baseOutdir}/gold_compare", mode: 'copy'
+    
+    input:
+        path calls
+        each path(gold_set)
+
+    output:
+        path "*gold.shared.vcf.gz", emit: gold_shared_vcfs
+    script:
+        def outVcf = calls.name.replaceAll("vcf.gz", "gold.shared.vcf")
+        def sameStrand = params.sameStrand ? 1 : 0
+        def sameType = params.sameType ? 1 : 0
+        def estDist = params.estDist ? 1 : 0
+
+        """
+            bcftools view -Ov ${calls} > calls.vcf
+            bcftools view -Ov ${gold_set} > gold_set.vcf
+            SURVIVOR merge <(ls calls.vcf gold_set.vcf) ${params.isecDist}\
+            ${params.callerSupport} ${sameStrand} ${sameType} ${estDist}\
+            ${params.isecMinLength} ${outVcf}
+            bcftools sort -Oz  -o ${outVcf}.gz ${outVcf} &&  bcftools index ${outVcf}.gz
+        """
+}
+
+process lowMapQualFilter {
     publishDir "${baseOutdir}/gold_compare", mode: 'copy'
     
     input:
@@ -178,7 +208,6 @@ process goldCompare {
             bcftools sort -Oz  -o ${outVcf}.gz ${outVcf} &&  bcftools index ${outVcf}.gz
         """
 }
-
 process extractPlotRegions {
     input:
         path calls
@@ -188,7 +217,7 @@ process extractPlotRegions {
         path "variants.lst", emit: plot_regions
     shell:
         '''
-            bcftools query -f '%ID\\t%CHROM\\t%POS\\t%SVLEN\\t%QUAL\\t%ALT\\n' !{calls} | sort -k5nr | awk -v topN=!{topN}  'BEGIN {OFS="\\t";} FNR <= topN {gsub("-","",$4);gsub("(<|>)","",$6);print $1,$2,$3,$3+$4,$4,$5,$6,FNR}' > variants.lst
+            bcftools filter -e 'SVTYPE == "INS"' !{calls} | bcftools query -f '%ID\\t%CHROM\\t%POS\\t%SVLEN\\t%QUAL\\t%ALT\\n' | sort -k5nr | awk -v topN=!{topN}  'BEGIN {OFS="\\t";} FNR <= topN {gsub("-","",$4);gsub("(<|>)","",$6);print $1,$2,$3,$3+$4,$4,$5,$6,FNR}' > variants.lst
         '''
 }
     
@@ -234,26 +263,27 @@ workflow {
     svimCalls(alignReads.out.alignment, ref, regions)
     snifflesCalls(alignReads.out.alignment, ref)
     svimCalls.out.svim_vcf | map { it.findAll { it =~/filtered.vcf.gz$/ }} | set { svim_filtered } 
-    highConfCalls(svim_filtered, snifflesCalls.out.sniffles_vcf)
+    highConfCalls(svim_filtered, snifflesCalls.out.sniffles_vcf, getLowMapQ.out.lowmq_bed)
 
     // Optional
     if (params.regions) {
-        svimCalls.out.svim_vcf | merge(snifflesCalls.out.sniffles_vcf) | merge(highConfCalls.out.highconf_vcf) | flatten |  filter { it =~ /(highconf|bnd|filtered|sniffles).vcf.gz$/ } | set { vcfs } 
+        svimCalls.out.svim_vcf | merge(snifflesCalls.out.sniffles_vcf) | merge(highConfCalls.out.highconf) | flatten |  filter { it =~ /(highconf|bnd|filtered|sniffles|indel|nolowmq).vcf.gz$/ } | set { vcfs } 
         extractRegions(vcfs, Channel.fromPath(params.regions))
     }
 
     if (params.goldSet) {
         if (params.regions) { 
-            extractRegions.out.isec_vcfs | flatten() | filter { it =~/highconf.isec.vcf.gz$/ } | set { gold_comp_vcf }
+            extractRegions.out.isec_vcfs | flatten() | filter { it =~/isec.vcf.gz$/ } | set { gold_comp_vcf }
         } else {
-            highConfCalls.out.highconf_vcf | set { gold_comp_vcf }
+            highConfCalls.out.highconf | set { gold_comp_vcf }
         }
         goldCompare(gold_comp_vcf, Channel.fromPath(params.goldSet))
         
     }
 
     // Plotting
-    extractPlotRegions(highConfCalls.out.highconf_vcf, params.topN)
+    highConfCalls.out.highconf | flatten | filter { it =~ /highconf.vcf.gz$/ } | set {to_plot_vcf}
+    extractPlotRegions(to_plot_vcf, params.topN)
     extractPlotRegions.out.plot_regions | splitCsv(sep: '\t') | map { it.removeAt(4); it.join(",") }  | set { plot_info }
     plotTopQual(alignReads.out.alignment.combine(plot_info))
 
