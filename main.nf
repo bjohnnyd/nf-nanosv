@@ -79,7 +79,7 @@ process svimCalls {
 
         
 process snifflesCalls {
-    label 'variantCalling'
+    label 'cpu'
 
     publishDir  "${baseOutdir}/sv/sniffles_calls", mode: 'copy'
     input:
@@ -139,6 +139,7 @@ process highConfCalls {
 }
 
 process extractRegions {
+    label 'cpu'
     publishDir "${baseOutdir}/isec_regions", mode: 'copy'
     
     input:
@@ -156,6 +157,25 @@ process extractRegions {
             cut -f7 ${outBed} > id.lst
             bcftools filter -i 'ID=@id.lst' ${vcf} | bcftools sort -Oz -o ${outVcf}
             bcftools index ${outVcf} && tabix ${outVcf}
+        """
+}
+
+process calculateCoverage {
+    publishDir  "${baseOutdir}/alignment/coverage", mode: 'copy'
+    
+    input:
+        tuple path(bam), path(bam_index)
+        each regions
+
+    output:
+        path "./*{mosdepth,per-base,regions,quantized,thresholds}*.{txt,bed.gz}" optional true
+    script:
+        def quantizeCmd = params.quantCoverage ? "-q ${params.quantCoverage}" : "" 
+        def regionsCmd = regions.name == "NO_FILE" ? "" : "-b ${regions}"
+        def prefix = params.name ? "${params.name}" : "" 
+
+        """
+            mosdepth -t ${task.cpus} ${quantizeCmd} ${regionsCmd} ${prefix} ${bam}
         """
 }
 
@@ -208,6 +228,7 @@ process lowMapQualFilter {
             bcftools sort -Oz  -o ${outVcf}.gz ${outVcf} &&  bcftools index ${outVcf}.gz
         """
 }
+
 process extractPlotRegions {
     input:
         path calls
@@ -260,6 +281,7 @@ workflow {
     // Main
     alignReads(reads, ref)
     getLowMapQ(alignReads.out.alignment)
+    calculateCoverage(alignReads.out.alignment, regions) 
     svimCalls(alignReads.out.alignment, ref, regions)
     snifflesCalls(alignReads.out.alignment, ref)
     svimCalls.out.svim_vcf | map { it.findAll { it =~/filtered.vcf.gz$/ }} | set { svim_filtered } 
