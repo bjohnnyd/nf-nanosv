@@ -7,7 +7,7 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 
-nextflow.preview.dsl = 2
+nextflow.enable.dsl = 2
 
 def baseOutdir = params.name ? "${params.outdir}/${params.name}" : "${params.outdir}"
 String.metaClass.isEmpty = { delegate.allWhitespace }
@@ -57,6 +57,7 @@ process svimCalls {
         path "*.log", emit: svim_log
         path "*.png", emit: svim_images
         path "*bnd*", emit: bnd_results
+        path "*svim.raw*", emit: svim_raw_vcf
     script:
         def (sampleCmd, fullPrefix, bndPrefix) = params.name ?  [ "--sample ${params.name}", "${params.name}.svim",  "${params.name}.bnd"] : ["", "svim", "bnd"]
 
@@ -64,7 +65,7 @@ process svimCalls {
             svim alignment --read_names ${sampleCmd} svim_calls ${bam} ${ref}
             tar czf svim.results.tar.gz svim_calls 
             mv svim_calls/*{log,png} .
-            bcftools view -Oz -o ${fullPrefix}.raw.vcf.gz svim_calls/variants.vcf 
+            bcftools sort -Oz -o ${fullPrefix}.raw.vcf.gz svim_calls/variants.vcf 
             bcftools filter -i 'FILTER=="PASS" && SVTYPE=="BND" && SUPPORT >= ${params.bndSupport} && QUAL >= ${params.bndQual}' ${fullPrefix}.raw.vcf.gz | bcftools sort -Oz  -o ${fullPrefix}.bnd.vcf.gz - 
             bcftools filter -i "${params.svimFilter}" ${fullPrefix}.raw.vcf.gz | bcftools sort -Oz -o ${fullPrefix}.filtered.vcf.gz  -
             bcftools query -f '%ID\\t%CHROM\\t%POS\\t%ALT\\t%READS\\t%QUAL\\n' ${fullPrefix}.bnd.vcf.gz | sort -k6nr > ${bndPrefix}.lst
@@ -76,6 +77,31 @@ process svimCalls {
         """
 
 }
+
+process filterSolo {
+    label 'cpu'
+
+    publishDir  "${baseOutdir}/sv/solo_filter/raw", mode: 'copy'
+    input:
+        tuple val(dist), path(vcf)
+    output:
+        tuple val(dist), path("*solo${dist}.vcf.gz"), emit: solo_var_vcf
+        path "*clustered${dist}.vcf.gz", emit: clustered_var_vcfs
+    script:
+        def vcfName = vcf.name.replaceAll(/(\.raw\.)*.vcf.gz/, "")
+
+        """
+            bcftools sort -Ov ${vcf} > calls.vcf
+            for i in {0..1};do echo "calls.vcf" >> vcf.lst
+            SURVIVOR merge vcf.lst ${dist} 2 0 0 0 ${params.soloVarSizeMin} clustered_vars.vcf
+            bedtools intersect -v -wa -a calls.vcf -b clustered_vars.vcf > solo_vars.vcf
+            cat <(bcftools view -h calls.vcf) solo_vars.vcf | bcftools sort -Oz -o ${vcfName}.solo${dist}.vcf.gz -
+            bcftools sort -Oz -o ${vcfName}.clustered${dist}.vcf.gz clustered_vars.vcf
+            tabix ${vcfName}.solo${dist}.vcf.gz && tabix ${vcfName}.clustered${dist}.vcf.gz
+        """
+}
+
+
 
         
 process snifflesCalls {
@@ -104,17 +130,19 @@ process snifflesCalls {
 }
 
 process highConfCalls {
-    publishDir  "${baseOutdir}/sv/high_conf", mode: 'copy'
+    publishDir  "${baseOutdir}/sv/", 
+        saveAs : {filename -> 
+            if (filename.indexOf("solo") > 0) "solo_filter/high_conf/$filename"
+            else "high_conf/$filename" 
+        }, mode: 'copy'
     input:
-        path svim_calls
-        path sniffles_calls
+        tuple path(svim_calls), path(sniffles_calls)
         path lowmq_bed
     output:
-        path '*highconf*vcf.gz*', emit: highconf
-        // path '*highconf.indel*', emit: highconf_indel
-        // path '*highconf.nolowmq*', emit: highconf_nolowmq
+        path '*highconf*vcf.gz*'
     script:
-    def vcfName = params.name ? "${params.name}.highconf" :"highconf" 
+    def baseName = svim_calls.name.replaceAll(/vcf.gz$/, "highconf")
+    def vcfName = params.name ? "${params.name}.${basename}" :"${basename}" 
     def sameStrand = params.sameStrand ? 1 : 0
     def sameType = params.sameType ? 1 : 0
     def estDist = params.estDist ? 1 : 0
@@ -168,7 +196,8 @@ process calculateCoverage {
         each regions
 
     output:
-        path "./*{mosdepth,per-base,regions,quantized,thresholds}*.{txt,bed.gz}" optional true
+        // path "./*{mosdepth,per-base,regions,quantized,thresholds}*.{txt,bed.gz}" optional true
+        path "./*{mosdepth,per-base,regions,quantized,thresholds}*.{txt,bed.gz}"
     script:
         def quantizeCmd = params.quantCoverage ? "-q ${params.quantCoverage}" : "" 
         def regionsCmd = regions.name == "NO_FILE" ? "" : "-b ${regions}"
@@ -180,7 +209,12 @@ process calculateCoverage {
 }
 
 process goldCompare {
-    publishDir "${baseOutdir}/gold_compare", mode: 'copy'
+    publishDir "${baseOutdir}/gold_compare",
+        saveAs: {filename -> 
+                    if (filename.indexOf("solo") > 0) "solo_filtered/$filename"
+                    else "$filename"
+                },
+    mode: 'copy'
     
     input:
         path calls
@@ -205,11 +239,16 @@ process goldCompare {
 }
 
 process lowMapQualFilter {
-    publishDir "${baseOutdir}/gold_compare", mode: 'copy'
+    publishDir "${baseOutdir}/gold_compare", 
+        saveAs: {filename -> 
+                    if (filename.indexOf("solo") > 0) "solo_filtered/$filename"
+                    else "$filename"
+                },
+    mode: 'copy'
     
     input:
         path calls
-        path gold_set
+        each path(gold_set)
 
     output:
         path "*gold.shared.vcf.gz", emit: gold_shared_vcfs
@@ -261,13 +300,16 @@ process plotTopQual {
 }
 
 workflow {
+    println params.reads
+    println params.ref
     if (params.sra) {
         reads = Channel.fromSRA(params.sra)
     } else {
         if (!params.reads) {
             error "Please provide path to FASTQ with --reads <path/to/fastq>"
         } else {
-            reads = Channel.fromPath(params.reads).ifEmpty { error "Please specify FASTQ files to use for variant calling" } 
+            // reads = Channel.fromPath(params.reads).ifEmpty { error "Please specify FASTQ files to use for variant calling" } 
+            reads = Channel.fromPath(params.reads)
         }
     }
 
@@ -275,7 +317,8 @@ workflow {
         println "You have not provided a name for this run please make sure the output is unique as the previous run will be overwritten"
     }
 
-    ref = Channel.fromPath(params.ref).ifEmpty { error "Please specify a reference file to use for alignment (can be remote file https/ftp)" } 
+    // ref = Channel.fromPath(params.ref).ifEmpty { error "Please specify a reference file to use for alignment (can be remote file https/ftp)" } 
+    ref = Channel.fromPath(params.ref)
     regions = params.regions ? Channel.fromPath(params.regions) : Channel.from("NO_FILE")
 
     // Main
@@ -285,28 +328,38 @@ workflow {
     svimCalls(alignReads.out.alignment, ref, regions)
     snifflesCalls(alignReads.out.alignment, ref)
     svimCalls.out.svim_vcf | map { it.findAll { it =~/filtered.vcf.gz$/ }} | set { svim_filtered } 
-    highConfCalls(svim_filtered, snifflesCalls.out.sniffles_vcf, getLowMapQ.out.lowmq_bed)
+
+    svim_filtered.combine(snifflesCalls.out.sniffles_vcf) | set  { main_vcfs } 
+    svimCalls.out.svim_vcf | merge(snifflesCalls.out.sniffles_vcf) | flatten | set { raw_vcfs }
+    highConfCalls(svim_filtered.combine(snifflesCalls.out.sniffles_vcf), getLowMapQ.out.lowmq_bed) | set { main_highconf_vcfs }
 
     // Optional
-    if (params.regions) {
-        svimCalls.out.svim_vcf | merge(snifflesCalls.out.sniffles_vcf) | merge(highConfCalls.out.highconf) | flatten |  filter { it =~ /(highconf|bnd|filtered|sniffles|indel|nolowmq).vcf.gz$/ } | set { vcfs } 
-        extractRegions(vcfs, Channel.fromPath(params.regions))
-    }
+    if (params.soloDist) {
+        dists = Channel.from(params.soloDist.split(","))
+        filterSolo(dists.combine(raw_vcfs))
+        // filterSolo.out.solo_var_vcf.join(filterSolo.out.solo_var_vcf) | map { tuple(it[1], it[2]) } | set { solo_filtered_ch }
+        // highConfCalls(solo_filtered_ch, getLowMapQ.out.lowmq_bed) | set  { solo_filtered_highconf }
 
-    if (params.goldSet) {
-        if (params.regions) { 
-            extractRegions.out.isec_vcfs | flatten() | filter { it =~/isec.vcf.gz$/ } | set { gold_comp_vcf }
-        } else {
-            highConfCalls.out.highconf | set { gold_comp_vcf }
-        }
-        goldCompare(gold_comp_vcf, Channel.fromPath(params.goldSet))
+    }
+    // if (params.regions) {
+        // svimCalls.out.svim_vcf | merge(snifflesCalls.out.sniffles_vcf) | merge(main_vcfs) |  flatten |  filter { it =~ /(highconf|bnd|filtered|sniffles|indel|nolowmq|solo*).vcf.gz$/ } | set { vcfs } 
+        // extractRegions(vcfs, Channel.fromPath(params.regions))
+    // }
+
+    // if (params.goldSet) {
+        // if (params.regions) { 
+            // extractRegions.out.isec_vcfs | flatten() | filter { it =~/isec.vcf.gz$/ } | set { gold_comp_vcf }
+        // } else {
+            // highConfCalls.out.highconf | set { gold_comp_vcf }
+        // }
+        // goldCompare(gold_comp_vcf, Channel.fromPath(params.goldSet))
         
-    }
+    // }
 
-    // Plotting
-    highConfCalls.out.highconf | flatten | filter { it =~ /highconf.vcf.gz$/ } | set {to_plot_vcf}
-    extractPlotRegions(to_plot_vcf, params.topN)
-    extractPlotRegions.out.plot_regions | splitCsv(sep: '\t') | map { it.removeAt(4); it.join(",") }  | set { plot_info }
-    plotTopQual(alignReads.out.alignment.combine(plot_info))
+    // // Plotting
+    // main_vcfs | merge(solo_filtered_highconf) | flatten | filter { it =~ /highconf.vcf.gz$/ } | set {to_plot_vcf}
+    // extractPlotRegions(to_plot_vcf, params.topN)
+    // extractPlotRegions.out.plot_regions | splitCsv(sep: '\t') | map { it.removeAt(4); it.join(",") }  | set { plot_info }
+    // plotTopQual(alignReads.out.alignment.combine(plot_info))
 
 }
