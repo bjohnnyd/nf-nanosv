@@ -63,16 +63,14 @@ process svimCalls {
         def clusterDist = "${dist}"
 
         if(clusterDist == "0" || clusterDist == "None") {
-            def filterCmd = 
-            """
+            def filterCmd = """
                 bcftools sort -Oz -o ${fullPrefix}.solo${clusterDist}.vcf.gz ${fullPrefix}.filtered.vcf.gz
                 bcftools view -h -Oz -o ${fullPrefix}.clustered${clusterDist}.vcf.gz  ${fullPrefix}.filtered.vcf.gz
                 tabix ${fullPrefix}.solo${clusterDist}.vcf.gz && tabix ${fullPrefix}.clustered${clusterDist}.vcf.gz
 
             """
         } else {
-            def filterCmd = 
-            """
+            def filterCmd = """
                 bcftools sort -Ov variants.vcf > calls.vcf
                 for i in {0..1};do echo "calls.vcf" >> vcf.lst
                 SURVIVOR merge vcf.lst ${clusterDist} 2 0 0 0 ${params.soloVarSizeMin} clustered_vars.vcf
