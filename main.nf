@@ -67,6 +67,7 @@ process svimCalls {
         def noDistFilter = """
                 bcftools sort -Oz -o ${fullPrefix}.solo${clusterDist}.filtered.vcf.gz ${fullPrefix}.filtered.vcf.gz
                 bcftools view -h -Oz -o ${fullPrefix}.clustered${clusterDist}.vcf.gz  ${fullPrefix}.filtered.vcf.gz
+                tabix ${fullPrefix}.solo${clusterDist}.filtered.vcf.gz && tabix ${fullPrefix}.clustered${clusterDist}.vcf.gz
             """
         def distFilter = """
                 bcftools filter -i 'QUAL >= ${params.soloMinQual}' -Ov ${fullPrefix}.raw.vcf.gz > calls.vcf
@@ -76,6 +77,7 @@ process svimCalls {
                 cat <(bcftools view -h calls.vcf) solo_vars.vcf | bcftools sort -Oz -o ${fullPrefix}.solo${clusterDist}.vcf.gz -
                 bcftools filter -i "${params.svimFilter}" ${fullPrefix}.solo${clusterDist}.vcf.gz | bcftools sort -Oz -o ${fullPrefix}.solo${clusterDist}.filtered.vcf.gz  -
                 bcftools sort -Oz -o ${fullPrefix}.clustered${clusterDist}.vcf.gz clustered_vars.vcf
+                tabix ${fullPrefix}.solo${clusterDist}.filtered.vcf.gz && tabix ${fullPrefix}.clustered${clusterDist}.vcf.gz
             """
         def soloFilterCmd = clusterDist == 0 || clusterDist == "None" ? "${noDistFilter}" : "${distFilter}"
 
@@ -121,6 +123,7 @@ process snifflesCalls {
     def noDistFilter = """
             bcftools view -Oz -o ${vcfName}.solo${clusterDist}.filtered.vcf.gz ${vcfName}.raw.vcf.gz
             bcftools view -h -Oz -o ${vcfName}.clustered${clusterDist}.vcf.gz  ${vcfName}.raw.vcf.gz
+            tabix ${vcfName}.solo${clusterDist}.filtered.vcf.gz && tabix ${vcfName}.clustered${clusterDist}.vcf.gz
         """
     def distFilter = """
             bcftools view -Ov ${vcfName}.raw.vcf.gz > calls.vcf
@@ -130,6 +133,7 @@ process snifflesCalls {
             cat <(bcftools view -h calls.vcf) solo_vars.vcf | bcftools sort -Oz -o ${vcfName}.solo${clusterDist}.vcf.gz -
             bcftools filter -i "${params.svimFilter}" ${vcfName}.solo${clusterDist}.vcf.gz | bcftools sort -Oz -o ${vcfName}.solo${clusterDist}.filtered.vcf.gz  -
             bcftools sort -Oz -o ${vcfName}.clustered${clusterDist}.vcf.gz clustered_vars.vcf
+            tabix ${vcfName}.solo${clusterDist}.filtered.vcf.gz && tabix ${vcfName}.clustered${clusterDist}.vcf.gz
         """
     def soloFilterCmd = clusterDist == 0 || clusterDist == "None" ? "${noDistFilter}" : "${distFilter}"
 
