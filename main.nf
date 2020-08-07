@@ -46,11 +46,14 @@ process getLowMapQ {
 
 
 process svimCalls {
-    publishDir "${baseOutdir}/sv/svim_calls", mode: 'copy'
+    publishDir "${baseOutdir}/sv/svim_calls",
+    saveAs: {filename -> 
+                if( filename ==~ /.*(solo|clustered)\d+.*.vcf.gz/ ) "solo_filt/${filename}"
+                else "${filename}"
+            },
+    mode: 'copy'
     input:
-        tuple path(bam), path(bam_index), val(dist)
-        path ref
-        file regions
+        tuple path(bam), path(bam_index), val(dist), path(ref)
     output:
         path 'svim.results.tar.gz', emit: svim_dir
         path "**.vcf.gz*", emit: svim_vcf
@@ -61,26 +64,22 @@ process svimCalls {
     script:
         def (sampleCmd, fullPrefix, bndPrefix) = params.name ?  [ "--sample ${params.name}", "${params.name}.svim",  "${params.name}.bnd"] : ["", "svim", "bnd"]
         def clusterDist = "${dist}"
-
-        if(clusterDist == "0" || clusterDist == "None") {
-            def filterCmd = """
-                bcftools sort -Oz -o ${fullPrefix}.solo${clusterDist}.vcf.gz ${fullPrefix}.filtered.vcf.gz
+        def noDistFilter = """
+                bcftools sort -Oz -o ${fullPrefix}.solo${clusterDist}.filtered.vcf.gz ${fullPrefix}.filtered.vcf.gz
                 bcftools view -h -Oz -o ${fullPrefix}.clustered${clusterDist}.vcf.gz  ${fullPrefix}.filtered.vcf.gz
-                tabix ${fullPrefix}.solo${clusterDist}.vcf.gz && tabix ${fullPrefix}.clustered${clusterDist}.vcf.gz
-
+                tabix ${fullPrefix}.solo${clusterDist}.filtered.vcf.gz && tabix ${fullPrefix}.clustered${clusterDist}.vcf.gz
             """
-        } else {
-            def filterCmd = """
-                bcftools sort -Ov variants.vcf > calls.vcf
-                for i in {0..1};do echo "calls.vcf" >> vcf.lst
+        def distFilter = """
+                bcftools filter -i 'QUAL >= ${params.soloMinQual}' -Ov ${fullPrefix}.raw.vcf.gz > calls.vcf
+                for i in {0..1};do echo "calls.vcf" >> vcf.lst;done
                 SURVIVOR merge vcf.lst ${clusterDist} 2 0 0 0 ${params.soloVarSizeMin} clustered_vars.vcf
                 bedtools intersect -v -wa -a calls.vcf -b clustered_vars.vcf > solo_vars.vcf
                 cat <(bcftools view -h calls.vcf) solo_vars.vcf | bcftools sort -Oz -o ${fullPrefix}.solo${clusterDist}.vcf.gz -
                 bcftools filter -i "${params.svimFilter}" ${fullPrefix}.solo${clusterDist}.vcf.gz | bcftools sort -Oz -o ${fullPrefix}.solo${clusterDist}.filtered.vcf.gz  -
                 bcftools sort -Oz -o ${fullPrefix}.clustered${clusterDist}.vcf.gz clustered_vars.vcf
-                tabix ${fullPrefix}.solo${clusterDist}.vcf.gz && tabix ${fullPrefix}.clustered${clusterDist}.vcf.gz
+                tabix ${fullPrefix}.solo${clusterDist}.filtered.vcf.gz && tabix ${fullPrefix}.clustered${clusterDist}.vcf.gz
             """
-        }
+        def soloFilterCmd = clusterDist == 0 || clusterDist == "None" ? "${noDistFilter}" : "${distFilter}"
 
         """
             svim alignment --read_names ${sampleCmd} svim_calls ${bam} ${ref}
@@ -95,7 +94,7 @@ process svimCalls {
             samtools view ${bam} | fgrep -w -f reads.lst > alignments.sam || :
             cat header.sam alignments.sam | samtools sort -o ${bndPrefix}.sort.bam -
             bamToBed -bedpe -cigar -i ${bndPrefix}.sort.bam > ${bndPrefix}.sort.bedpe
-            ${filterCmd}
+            ${soloFilterCmd}
         """
 
 }
@@ -104,10 +103,14 @@ process svimCalls {
 process snifflesCalls {
     label 'cpu'
 
-    publishDir  "${baseOutdir}/sv/sniffles_calls", mode: 'copy'
+    publishDir  "${baseOutdir}/sv/sniffles_calls",
+    saveAs: {filename -> 
+                if( filename ==~ /.*(solo|clustered)\d+.*.vcf.gz/ ) "solo_filt/${filename}"
+                else "${filename}"
+            },
+    mode: 'copy'
     input:
-        tuple path(bam), path(bam_index), val(dist)
-        path ref
+        tuple path(bam), path(bam_index), val(dist), path(ref)
     output:
         path "*vcf.gz"
         path '*sniffles.raw.vcf.gz', emit: sniffles_raw_vcf
@@ -117,20 +120,14 @@ process snifflesCalls {
     def cluster = params.snifflesCluster ? "--cluster" : ""
     def genotype = params.snifflesGenotype ? "--genotype" : ""
     def clusterDist = "${dist}"
-
-    if(clusterDist == "0" || clusterDist == "None") {
-        def filterCmd = 
-        """
-            bcftools sort -Oz -o ${vcfName}.solo${clusterDist}.filtered.vcf.gz ${vcfName}.raw.vcf.gz
-            bcftools view -h -Oz -o ${vcfName}.clustered${clusterDist}.vcf.gz  ${vcfName}.filtered.vcf.gz
+    def noDistFilter = """
+            bcftools view -Oz -o ${vcfName}.solo${clusterDist}.filtered.vcf.gz ${vcfName}.raw.vcf.gz
+            bcftools view -h -Oz -o ${vcfName}.clustered${clusterDist}.vcf.gz  ${vcfName}.raw.vcf.gz
             tabix ${vcfName}.solo${clusterDist}.filtered.vcf.gz && tabix ${vcfName}.clustered${clusterDist}.vcf.gz
-
         """
-    } else {
-        def filterCmd = 
-        """
+    def distFilter = """
             bcftools view -Ov ${vcfName}.raw.vcf.gz > calls.vcf
-            for i in {0..1};do echo "calls.vcf" >> vcf.lst
+            for i in {0..1};do echo "calls.vcf" >> vcf.lst; done
             SURVIVOR merge vcf.lst ${clusterDist} 2 0 0 0 ${params.soloVarSizeMin} clustered_vars.vcf
             bedtools intersect -v -wa -a calls.vcf -b clustered_vars.vcf > solo_vars.vcf
             cat <(bcftools view -h calls.vcf) solo_vars.vcf | bcftools sort -Oz -o ${vcfName}.solo${clusterDist}.vcf.gz -
@@ -138,8 +135,7 @@ process snifflesCalls {
             bcftools sort -Oz -o ${vcfName}.clustered${clusterDist}.vcf.gz clustered_vars.vcf
             tabix ${vcfName}.solo${clusterDist}.filtered.vcf.gz && tabix ${vcfName}.clustered${clusterDist}.vcf.gz
         """
-    }
-
+    def soloFilterCmd = clusterDist == 0 || clusterDist == "None" ? "${noDistFilter}" : "${distFilter}"
 
     """ 
         sniffles -t ${task.cpus} -m ${bam} -s ${params.snifflesMinSupport} \
@@ -147,6 +143,7 @@ process snifflesCalls {
         -l ${params.snifflesMinLength} -r ${params.snifflesMinSeqSize} \
         ${cluster} ${genotype} ${params.snifflesAdvanced}
         bcftools sort -Oz -o ${vcfName}.raw.vcf.gz ${vcfName}.raw.vcf
+        ${soloFilterCmd}
     """
 
 }
@@ -328,11 +325,11 @@ workflow {
     alignReads(reads, ref)
     getLowMapQ(alignReads.out.alignment)
     calculateCoverage(alignReads.out.alignment, regions) 
-    alignReads.out.alignment | combine(dists) | set { align_dist_ch} 
-    svimCalls(align_dist_ch, ref, regions)
-    snifflesCalls(align_dist_ch, ref)
+    alignReads.out.alignment | combine(dists) | combine(ref) |set { align_dist_ch} 
+    svimCalls(align_dist_ch)
+    snifflesCalls(align_dist_ch)
     svimCalls.out.svim_vcf | map { it.findAll { it =~/filtered.vcf.gz$/ }} | set { svim_filtered } 
-    svimCalls.out.svim_filtered_vcf | join(snifflesCalls.out.sniffles_filtered_vcf) | map { tuple(it[1], it[2])} |set { var_dist_ch} 
+    svimCalls.out.svim_filtered_vcf | join(snifflesCalls.out.sniffles_filtered_vcf) | map { tuple(it[1], it[2])} | set { var_dist_ch} 
     highConfCalls(var_dist_ch, getLowMapQ.out.lowmq_bed)
 
     // Optional
